@@ -1,12 +1,21 @@
 #include "usb_netif_glue.h"
 
 #include <stdbool.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "sdkconfig.h"
+
+#if __has_include("py/mpprint.h")
+#define MP_USBNET_HAS_MP_PRINT 1
+#include "py/mpprint.h"
+#else
+#define MP_USBNET_HAS_MP_PRINT 0
+#endif
 
 static const char *TAG = "usb_netif_glue";
 static bool s_running = false;
@@ -16,6 +25,16 @@ static uint32_t s_rx_ok = 0;
 static uint32_t s_rx_err = 0;
 static uint32_t s_tx_ok = 0;
 static uint32_t s_tx_err = 0;
+
+static void usbnet_diag_printf(const char *fmt, ...) {
+    char msg[192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    printf("[usbnet_glue] %s\n", msg);
+}
 
 /*
  * Some integration paths (for example MicroPython USER_C_MODULES-only wiring)
@@ -108,6 +127,7 @@ esp_err_t usb_netif_glue_start(esp_netif_t *netif) {
     esp_netif_action_start(s_netif, 0, 0, NULL);
     esp_netif_action_connected(s_netif, 0, 0, NULL);
     ESP_LOGI(TAG, "usb netif glue started class=%s", class_name(s_usbnet_class));
+    usbnet_diag_printf("start class=%s", class_name(s_usbnet_class));
     s_running = true;
     return ESP_OK;
 }
@@ -129,6 +149,7 @@ esp_err_t usb_netif_glue_stop(void) {
 
     s_netif = NULL;
     ESP_LOGI(TAG, "usb netif glue stopped");
+    usbnet_diag_printf("stop");
     s_running = false;
     return ESP_OK;
 }
@@ -167,9 +188,6 @@ esp_err_t usb_netif_glue_on_lwip_tx(const uint8_t *frame, size_t len) {
     }
 
     esp_err_t err = mp_usbnet_tinyusb_net_tx(frame, len);
-    // #region agent log
-    ESP_LOGI(TAG, "AGENTLOG H=D loc=on_lwip_tx len=%u err=%d", (unsigned)len, (int)err);
-    // #endregion
     if (err != ESP_OK) {
         s_tx_err++;
         ESP_LOGW(TAG, "lwip tx->usb failed err=0x%x len=%u", (unsigned int)err, (unsigned int)len);

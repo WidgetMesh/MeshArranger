@@ -1,11 +1,20 @@
 #include "usb_netif_glue.h"
 
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
 #include "esp_mac.h"
+
+#if __has_include("py/mpprint.h")
+#define MP_USBNET_HAS_MP_PRINT 1
+#include "py/mpprint.h"
+#else
+#define MP_USBNET_HAS_MP_PRINT 0
+#endif
 
 #if __has_include("tinyusb.h") && __has_include("tinyusb_net.h")
 #define MP_USBNET_HAS_ESP_TINYUSB 1
@@ -33,6 +42,25 @@
 
 static const char *TAG = "usb_netif_port";
 static bool s_tinyusb_net_started = false;
+static const uint8_t s_default_usb_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+
+static inline bool usbnet_is_ipv4_or_arp_frame(const uint8_t *frame, size_t len) {
+    if (!frame || len < 14) {
+        return false;
+    }
+    uint16_t ethertype = ((uint16_t)frame[12] << 8) | frame[13];
+    return ethertype == 0x0800 || ethertype == 0x0806; // IPv4 or ARP
+}
+
+static void usbnet_diag_printf(const char *fmt, ...) {
+    char msg[192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    printf("[usbnet_port] %s\n", msg);
+}
 
 #if MP_USBNET_HAS_TINYUSB_RAW
 // Present in MicroPython TinyUSB integration; weak so this component can still
@@ -50,33 +78,42 @@ static size_t s_raw_tx_len = 0;
 static bool s_raw_tx_queued = false;
 static bool s_raw_tx_pending = false;
 static bool s_raw_rx_seen = false;
+static bool s_raw_rx_suspended = false;
+static bool s_raw_rx_renew_pending = false;
 static portMUX_TYPE s_raw_lock = portMUX_INITIALIZER_UNLOCKED;
 uint8_t tud_network_mac_address[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
 
 static void usbnet_raw_try_xmit_queued(void);
 
 void tud_network_init_cb(void) {
+    usbnet_diag_printf("tud_network_init_cb");
 }
 
 bool tud_network_recv_cb(const uint8_t *src, uint16_t size) {
     if (!s_tinyusb_net_started) {
-        tud_network_recv_renew();
-        return false;
+        if (!s_raw_rx_suspended) {
+            usbnet_diag_printf("recv_cb suspended until usbnet.start (last_size=%u)", (unsigned)size);
+            s_raw_rx_suspended = true;
+        }
+        // Return true and intentionally do not renew RX while not started.
+        // This back-pressures host traffic so REPL stays responsive.
+        return true;
     }
+    // Any callback means host-side data interface is active.
     s_raw_rx_seen = true;
-    // #region agent log
-    if (src && size > 0) {
-        ESP_LOGI(TAG, "AGENTLOG H=A loc=recv_cb rx_seen=1 size=%u", (unsigned)size);
-    }
-    // #endregion
     if (!src || size == 0) {
-        usbnet_raw_try_xmit_queued();
+        tud_network_recv_renew();
+        return true;
+    }
+
+    // Keep this path focused on basic IPv4/ARP. Dropping IPv6/multicast noise
+    // avoids starving the tiny single-frame TX queue used by the raw backend.
+    if (!usbnet_is_ipv4_or_arp_frame(src, size)) {
         tud_network_recv_renew();
         return true;
     }
 
     esp_err_t err = usb_netif_glue_on_usb_rx(src, size);
-    usbnet_raw_try_xmit_queued();
     tud_network_recv_renew();
     return err == ESP_OK;
 }
@@ -86,10 +123,6 @@ uint16_t tud_network_xmit_cb(uint8_t *dst, void *ref, uint16_t arg) {
     (void)arg;
     portENTER_CRITICAL(&s_raw_lock);
     if (!dst || !s_raw_tx_pending || !s_raw_tx_queued || s_raw_tx_len == 0) {
-        // #region agent log
-        ESP_LOGI(TAG, "AGENTLOG H=C loc=xmit_cb skip=1 dst=%d pending=%d queued=%d len=%u",
-                 dst ? 1 : 0, s_raw_tx_pending ? 1 : 0, s_raw_tx_queued ? 1 : 0, (unsigned)s_raw_tx_len);
-        // #endregion
         portEXIT_CRITICAL(&s_raw_lock);
         return 0;
     }
@@ -100,24 +133,19 @@ uint16_t tud_network_xmit_cb(uint8_t *dst, void *ref, uint16_t arg) {
     s_raw_tx_queued = false;
     s_raw_tx_pending = false;
     portEXIT_CRITICAL(&s_raw_lock);
-    // #region agent log
-    ESP_LOGI(TAG, "AGENTLOG H=C loc=xmit_cb ret=%u", (unsigned)ret);
-    // #endregion
     return ret;
 }
 
 void mp_usbd_post_task_hook(void) {
+    if (s_tinyusb_net_started && s_raw_rx_renew_pending && tud_ready()) {
+        tud_network_recv_renew();
+        s_raw_rx_renew_pending = false;
+    }
     usbnet_raw_try_xmit_queued();
 }
 
 static void usbnet_raw_try_xmit_queued(void) {
     if (!s_tinyusb_net_started || !tud_ready()) {
-        // #region agent log
-        if (s_raw_tx_queued) {
-            ESP_LOGI(TAG, "AGENTLOG H=B loc=try_xmit skip=not_started_or_not_ready started=%d ready=%d",
-                     s_tinyusb_net_started ? 1 : 0, tud_ready() ? 1 : 0);
-        }
-        // #endregion
         return;
     }
 
@@ -131,12 +159,6 @@ static void usbnet_raw_try_xmit_queued(void) {
     portEXIT_CRITICAL(&s_raw_lock);
 
     if (!need_send || !tud_network_can_xmit((uint16_t)tx_len)) {
-        // #region agent log
-        if (need_send) {
-            ESP_LOGI(TAG, "AGENTLOG H=B loc=try_xmit skip=can_xmit_false tx_len=%u can_xmit=%d",
-                     (unsigned)tx_len, tud_network_can_xmit((uint16_t)tx_len) ? 1 : 0);
-        }
-        // #endregion
         return;
     }
 
@@ -150,10 +172,18 @@ static void usbnet_raw_try_xmit_queued(void) {
     portEXIT_CRITICAL(&s_raw_lock);
 
     if (can_send_now) {
-        // #region agent log
-        ESP_LOGI(TAG, "AGENTLOG H=B loc=try_xmit calling_tud_network_xmit tx_len=%u", (unsigned)tx_len);
-        // #endregion
         tud_network_xmit(NULL, 0);
+        // tud_network_xmit() should synchronously invoke tud_network_xmit_cb()
+        // before returning. If it doesn't (e.g. internal race where can_xmit
+        // changed), clear pending so future retries can proceed.
+        portENTER_CRITICAL(&s_raw_lock);
+        if (s_raw_tx_pending) {
+            s_raw_tx_pending = false;
+            portEXIT_CRITICAL(&s_raw_lock);
+            ESP_LOGW(TAG, "recovered stale tx pending state len=%u", (unsigned)tx_len);
+        } else {
+            portEXIT_CRITICAL(&s_raw_lock);
+        }
     }
 }
 #endif
@@ -224,39 +254,41 @@ esp_err_t mp_usbnet_tinyusb_net_start(esp_netif_t *netif, usbnet_class_t usb_cla
     esp_netif_set_mac(netif, lwip_mac);
 
     ESP_LOGI(TAG,
-             "TinyUSB net started usb-mac=%02x:%02x:%02x:%02x:%02x:%02x",
-             net_cfg.mac_addr[0], net_cfg.mac_addr[1], net_cfg.mac_addr[2],
-             net_cfg.mac_addr[3], net_cfg.mac_addr[4], net_cfg.mac_addr[5]);
+            "TinyUSB net started usb-mac=%02x:%02x:%02x:%02x:%02x:%02x",
+            net_cfg.mac_addr[0], net_cfg.mac_addr[1], net_cfg.mac_addr[2],
+            net_cfg.mac_addr[3], net_cfg.mac_addr[4], net_cfg.mac_addr[5]);
+    usbnet_diag_printf("tinyusb_net_start(esp_tinyusb) ok");
     s_tinyusb_net_started = true;
     return ESP_OK;
 #elif MP_USBNET_HAS_TINYUSB_RAW
-    esp_err_t mac_err = esp_read_mac(tud_network_mac_address, ESP_MAC_WIFI_STA);
-    if (mac_err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_read_mac failed err=0x%x", (unsigned int)mac_err);
-        return mac_err;
-    }
-    tud_network_mac_address[0] = (uint8_t)((tud_network_mac_address[0] | 0x02) & 0xFE);
-
+    // TinyUSB MAC is what the host stack uses for the USB NIC address.
+    // lwIP MAC must be different from host MAC so ARP source/destination are distinct.
+    memcpy(tud_network_mac_address, s_default_usb_mac, sizeof(tud_network_mac_address));
     uint8_t lwip_mac[6];
     memcpy(lwip_mac, tud_network_mac_address, sizeof(lwip_mac));
-    lwip_mac[5] ^= 0x01;
+    lwip_mac[5] = (uint8_t)(lwip_mac[5] + 1);
+    if (memcmp(lwip_mac, tud_network_mac_address, sizeof(lwip_mac)) == 0) {
+        lwip_mac[5] ^= 0x01;
+    }
     esp_netif_set_mac(netif, lwip_mac);
 
     s_raw_tx_pending = false;
     s_raw_tx_queued = false;
     s_raw_tx_len = 0;
     s_raw_rx_seen = false;
-#if CFG_TUD_NCM
-    tud_network_link_state(0, true);
-#endif
+    s_raw_rx_suspended = false;
+    s_raw_rx_renew_pending = true;
     // For ECM/RNDIS, TinyUSB calls tud_network_recv_renew() when the host
     // activates the data interface (SET_INTERFACE alt=1). Calling it here can
     // be too early.
     s_tinyusb_net_started = true;
+    usbnet_kick_tinyusb_task();
     ESP_LOGI(TAG,
-             "TinyUSB raw net started mac=%02x:%02x:%02x:%02x:%02x:%02x",
+             "TinyUSB raw net started usb-mac=%02x:%02x:%02x:%02x:%02x:%02x lwip-mac=%02x:%02x:%02x:%02x:%02x:%02x",
              tud_network_mac_address[0], tud_network_mac_address[1], tud_network_mac_address[2],
-             tud_network_mac_address[3], tud_network_mac_address[4], tud_network_mac_address[5]);
+             tud_network_mac_address[3], tud_network_mac_address[4], tud_network_mac_address[5],
+             lwip_mac[0], lwip_mac[1], lwip_mac[2], lwip_mac[3], lwip_mac[4], lwip_mac[5]);
+    usbnet_diag_printf("tinyusb_net_start(raw) ok");
     return ESP_OK;
 #else
     (void)usb_class;
@@ -267,14 +299,13 @@ esp_err_t mp_usbnet_tinyusb_net_start(esp_netif_t *netif, usbnet_class_t usb_cla
 }
 
 esp_err_t mp_usbnet_tinyusb_net_stop(void) {
-#if MP_USBNET_HAS_TINYUSB_RAW && CFG_TUD_NCM
-    tud_network_link_state(0, false);
-#endif
 #if MP_USBNET_HAS_TINYUSB_RAW
     s_raw_tx_pending = false;
     s_raw_tx_queued = false;
     s_raw_tx_len = 0;
     s_raw_rx_seen = false;
+    s_raw_rx_suspended = false;
+    s_raw_rx_renew_pending = false;
 #endif
     s_tinyusb_net_started = false;
     return ESP_OK;
@@ -303,41 +334,35 @@ esp_err_t mp_usbnet_tinyusb_net_tx(const uint8_t *frame, size_t len) {
         return ESP_ERR_INVALID_SIZE;
     }
 
-    if (!tud_ready() || !s_raw_rx_seen) {
-        // #region agent log
-        ESP_LOGI(TAG, "AGENTLOG H=A loc=tinyusb_net_tx reject ready=%d rx_seen=%d len=%u",
-                 tud_ready() ? 1 : 0, s_raw_rx_seen ? 1 : 0, (unsigned)len);
-        // #endregion
-        return ESP_ERR_INVALID_STATE;
+    // Keep this path focused on basic IPv4/ARP so discovery/ping remains reliable.
+    if (!usbnet_is_ipv4_or_arp_frame(frame, len)) {
+        return ESP_OK;
     }
 
-    // Enqueue one frame from lwIP context; actual transmit is drained from
-    // TinyUSB callback context (recv + scheduled mp_usbd task hook) to avoid
-    // cross-context races.
-    for (int i = 0; i < 100; ++i) {
-        bool queued = false;
+    // Enqueue one frame from lwIP context. Actual USB submit is drained from
+    // mp_usbd_post_task_hook() in TinyUSB task context.
+    //
+    // If a frame is queued but not pending, replace it with the newest frame
+    // so ARP/ICMP retries are not starved by stale traffic.
+    for (int i = 0; i < 50; ++i) {
+        bool queued_or_replaced = false;
         portENTER_CRITICAL(&s_raw_lock);
-        if (!s_raw_tx_queued && !s_raw_tx_pending) {
+        if (!s_raw_tx_pending) {
             memcpy(s_raw_tx_frame, frame, len);
             s_raw_tx_len = len;
             s_raw_tx_queued = true;
             s_raw_tx_pending = false;
-            queued = true;
+            queued_or_replaced = true;
         }
         portEXIT_CRITICAL(&s_raw_lock);
-        if (queued) {
-            // #region agent log
-            ESP_LOGI(TAG, "AGENTLOG H=A loc=tinyusb_net_tx queued=1 len=%u iter=%d", (unsigned)len, i);
-            // #endregion
+        if (queued_or_replaced) {
             usbnet_kick_tinyusb_task();
             return ESP_OK;
         }
         usbnet_kick_tinyusb_task();
         vTaskDelay(pdMS_TO_TICKS(1));
     }
-    // #region agent log
-    ESP_LOGI(TAG, "AGENTLOG H=A loc=tinyusb_net_tx timeout=1 len=%u", (unsigned)len);
-    // #endregion
+    ESP_LOGW(TAG, "tx submit timeout len=%u", (unsigned)len);
     return ESP_ERR_TIMEOUT;
 #else
     (void)frame;

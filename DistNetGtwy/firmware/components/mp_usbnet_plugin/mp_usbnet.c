@@ -10,10 +10,13 @@
 #include "usb_netif_glue.h"
 #include "lwip/ip_addr.h"
 
-// MicroPython headers are expected when this component is linked into
-// the MicroPython ESP32 port build.
+#if __has_include("py/obj.h") && __has_include("py/runtime.h")
+#define MP_USBNET_ENABLE_MICROPY_BINDINGS (1)
 #include "py/obj.h"
 #include "py/runtime.h"
+#else
+#define MP_USBNET_ENABLE_MICROPY_BINDINGS (0)
+#endif
 
 static const char *TAG = "mp_usbnet";
 
@@ -139,6 +142,7 @@ esp_netif_t *mp_usbnet_get_esp_netif(void) {
     return s_netif;
 }
 
+#if MP_USBNET_ENABLE_MICROPY_BINDINGS
 // ---- MicroPython module bindings ----
 
 static mp_obj_t mp_usbnet_start_py(size_t n_args, const mp_obj_t *args) {
@@ -236,3 +240,4 @@ const mp_obj_module_t mp_module_usbnet = {
 };
 
 MP_REGISTER_MODULE(MP_QSTR_usbnet, mp_module_usbnet);
+#endif // MP_USBNET_ENABLE_MICROPY_BINDINGS
