@@ -3,7 +3,6 @@
     ["distnet", "github:WidgetMesh/MeshArranger/DistNet/MainBot.py"]
    ],
   "deps": [
-    ["micropyserver", "github:ROSMicroPy/rmp_pylib-micropyserver"]
   ],
   "version": "0.2"
 }
