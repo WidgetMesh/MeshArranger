@@ -1,6 +1,8 @@
 {
-  "urls": [
-    ["distnet", "github:WidgetMesh/MeshArranger/DistNet/MainBot.py"]
-   ],
-  "version": "0.2"
+  "name": "DistNetGtwy",
+  "version": "1.0",
+  "deps": [
+    ["distnwet", "github:john/robot-bus"],
+    ["math-utils", "https://example.com/mip/math-utils"]
+  ]
 }
