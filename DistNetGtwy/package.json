@@ -1,9 +1,9 @@
 {
   "urls": [
-    ["/distnet/MainBot.py", "github:WidgetMesh/MeshArranger/DistNet/MainBot.py"]
+    ["distnet", "github:WidgetMesh/MeshArranger/DistNet/MainBot.py"]
    ],
   "deps": [
-    ["github:ROSMicroPy/rmp_pylib-micropyserver", "master"]
+    ["micropyserver", "github:ROSMicroPy/rmp_pylib-micropyserver"]
   ],
   "version": "0.2"
 }
