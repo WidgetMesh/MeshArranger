@@ -2,7 +2,5 @@
   "urls": [
     ["distnet", "github:WidgetMesh/MeshArranger/DistNet/MainBot.py"]
    ],
-  "deps": [
-  ],
   "version": "0.2"
 }
