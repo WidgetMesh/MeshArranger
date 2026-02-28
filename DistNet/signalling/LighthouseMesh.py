@@ -19,7 +19,7 @@ class LighthouseMesh():
             cls._initialized = False 
         return cls._instance
         
-    def__init__(self):
+    def __init__(self):
         self.wlan_sta = None
         self.wlan_mac = None
         self.espnow = None
