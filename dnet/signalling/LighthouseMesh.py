@@ -24,7 +24,7 @@ class LighthouseMesh():
         self.wlan_mac = None
         self.espnow = None
         self.payload_IsThereAnybodyOutThere = None
-        self,payload_Profile = None
+        self.payload_Profile = None
     
         self.wlan_sta = network.WLAN(network.STA_IF)  # Or network.AP_IF
         self.wlan_sta.active(True)
