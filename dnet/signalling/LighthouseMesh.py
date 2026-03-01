@@ -28,7 +28,7 @@ class LighthouseMesh():
     
         self.wlan_sta = network.WLAN(network.STA_IF)  # Or network.AP_IF
         self.wlan_sta.active(True)
-        self.wlan_mac = wlan_sta.config('mac')
+        self.wlan_mac = self.wlan_sta.config('mac')
         self.wlan_sta.config()  # Set channel explicitly if packets are not delivered
         self.wlan_sta.disconnect()      # For ESP8266
 
