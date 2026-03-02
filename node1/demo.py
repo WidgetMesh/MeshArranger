@@ -14,7 +14,7 @@ from dnet.messaging import MessagingEndpoint
 from dnet.signalling.LighthouseMesh import LighthouseMesh
 
 
-PROFILE_PATH = "profile.json"
+PROFILE_PATH = "/lib/profile.json"
 BROADCAST_INTERVAL_S = 5
 
 
