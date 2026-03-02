@@ -1,6 +1,19 @@
 import network
 import time
 
+def wifi_reset():
+    sta = network.WLAN(network.STA_IF)
+    ap = network.WLAN(network.AP_IF)
+    sta.active(False)
+    ap.active(False)
+    sta.active(True)
+    sta.scan()
+    
+    # Optional: wait for it to be active
+    while not sta.active():
+        time.sleep(0.1)
+    sta.disconnect() # For ESP8266
+    
 def connect_wifi(ssid, password):
     # Create a station network interface
     wlan = network.WLAN(network.STA_IF)
@@ -32,4 +45,5 @@ def connect_wifi(ssid, password):
 
 # --- Example Usage ---
 # Replace 'YOUR_SSID' and 'YOUR_PASSWORD' with your actual credentials
-connect_wifi('robot-test-net', 'RobotsCanDream')
+wifi_reset()
+connect_wifi('Ruby', 'CanRobotsDream')

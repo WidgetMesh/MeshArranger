@@ -8,6 +8,10 @@ import ubinascii
 import network
 import aioespnow
 try:
+    import utime as time
+except Exception:
+    import time
+try:
     import logging
 except Exception:
     logging = None
@@ -21,6 +25,14 @@ except Exception:
 class LighthouseMesh:
     """ESP-NOW mesh adapter with interrupt-driven RX queueing."""
     BROADCAST_TARGET = const(b"\xff\xff\xff\xff\xff\xff")
+    ESPNOW_MAX_PAYLOAD_BYTES = const(250)
+
+    # Fragment header: magic(2) + version(1) + msg_id(2) + total(1) + index(1)
+    _FRAG_MAGIC = b"\x7fM"
+    _FRAG_VERSION = const(1)
+    _FRAG_HEADER_BYTES = const(7)
+    _FRAG_PAYLOAD_MAX_BYTES = const(ESPNOW_MAX_PAYLOAD_BYTES - _FRAG_HEADER_BYTES)
+    _FRAG_REASSEMBLY_TIMEOUT_MS = const(30000)
 
     _instance = None
 
@@ -55,6 +67,8 @@ class LighthouseMesh:
         self._rx_queue = []
         self._max_rx_queue = 32
         self._rx_event = None
+        self._tx_message_id = 0
+        self._fragment_buffers = {}
         self.use_broadcast = True
         self.default_peer = self.BROADCAST_TARGET
 
@@ -109,7 +123,10 @@ class LighthouseMesh:
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         try:
-            self.espnow.send(target, payload)
+            if len(payload) <= self.ESPNOW_MAX_PAYLOAD_BYTES:
+                self.espnow.send(target, payload)
+            else:
+                self._send_fragmented(target, payload)
         except Exception as exc:
             self._log_error(
                 "send failed target={} bytes={} err={}".format(
@@ -130,8 +147,13 @@ class LighthouseMesh:
         mac, msg = self.espnow.irecv(timeout_ms=timeout_ms)
         if mac is None or msg is None:
             return None, None
-        self._log_debug("recv fallback peer={} bytes={}".format(self.mac_to_node_id(mac), len(msg)))
-        return mac, msg
+        payload = self._ingest_rx_packet(mac, msg)
+        if payload is None:
+            return None, None
+        self._log_debug(
+            "recv fallback peer={} bytes={}".format(self.mac_to_node_id(mac), len(payload))
+        )
+        return mac, payload
 
     def create_transport(self, default_peer=None):
         """Build transport adapter used by dnet.messaging.MessagingEndpoint."""
@@ -202,15 +224,121 @@ class LighthouseMesh:
             mac, msg = self.espnow.irecv(timeout_ms=0)
             if mac is None or msg is None:
                 break
+            payload = self._ingest_rx_packet(mac, msg)
+            if payload is None:
+                continue
             if len(self._rx_queue) >= self._max_rx_queue:
                 # Drop oldest packet to make room for newest packet.
                 self._rx_queue.pop(0)
                 self._log_error("rx queue overflow, dropping oldest packet")
-            self._rx_queue.append((mac, msg))
+            self._rx_queue.append((mac, payload))
             drained += 1
         if drained:
             self._log_debug("irq drained {} packet(s), queue={}".format(drained, len(self._rx_queue)))
         self._signal_rx_event()
+
+    def _next_message_id(self):
+        self._tx_message_id = (self._tx_message_id + 1) & 0xFFFF
+        return self._tx_message_id
+
+    def _send_fragmented(self, target, payload):
+        max_payload = self._FRAG_PAYLOAD_MAX_BYTES
+        total = (len(payload) + max_payload - 1) // max_payload
+        if total > 255:
+            raise ValueError("payload too large for fragmentation: {} bytes".format(len(payload)))
+
+        msg_id = self._next_message_id()
+        for index in range(total):
+            start = index * max_payload
+            end = start + max_payload
+            part = payload[start:end]
+            header = bytes(
+                (
+                    self._FRAG_MAGIC[0],
+                    self._FRAG_MAGIC[1],
+                    self._FRAG_VERSION,
+                    (msg_id >> 8) & 0xFF,
+                    msg_id & 0xFF,
+                    total,
+                    index,
+                )
+            )
+            self.espnow.send(target, header + part)
+        self._log_debug(
+            "fragmented send target={} bytes={} chunks={}".format(
+                self.mac_to_node_id(target), len(payload), total
+            )
+        )
+
+    def _ingest_rx_packet(self, mac, msg):
+        self._expire_fragment_buffers()
+        frag = self._parse_fragment(msg)
+        if frag is None:
+            return msg
+        if frag is False:
+            return None
+
+        msg_id, total, index, part = frag
+        key = (mac, msg_id)
+        now = self._now_ms()
+        entry = self._fragment_buffers.get(key)
+        if entry is None or entry["total"] != total:
+            entry = {"total": total, "parts": {}, "updated_ms": now}
+            self._fragment_buffers[key] = entry
+
+        entry["parts"][index] = part
+        entry["updated_ms"] = now
+
+        if len(entry["parts"]) < total:
+            return None
+
+        assembled = bytearray()
+        for i in range(total):
+            if i not in entry["parts"]:
+                return None
+            assembled.extend(entry["parts"][i])
+        del self._fragment_buffers[key]
+        return bytes(assembled)
+
+    def _parse_fragment(self, msg):
+        if len(msg) < self._FRAG_HEADER_BYTES:
+            return None
+        if msg[0:2] != self._FRAG_MAGIC:
+            return None
+        if msg[2] != self._FRAG_VERSION:
+            self._log_error("dropping fragment with unsupported version={}".format(msg[2]))
+            return False
+
+        msg_id = (msg[3] << 8) | msg[4]
+        total = msg[5]
+        index = msg[6]
+        if total == 0 or index >= total:
+            self._log_error("dropping malformed fragment id={} idx={}/{}".format(msg_id, index, total))
+            return False
+        return msg_id, total, index, msg[self._FRAG_HEADER_BYTES:]
+
+    def _expire_fragment_buffers(self):
+        if not self._fragment_buffers:
+            return
+        now = self._now_ms()
+        stale = []
+        for key, entry in self._fragment_buffers.items():
+            if self._ticks_diff(now, entry["updated_ms"]) > self._FRAG_REASSEMBLY_TIMEOUT_MS:
+                stale.append(key)
+        for key in stale:
+            del self._fragment_buffers[key]
+        if stale:
+            self._log_error("dropped {} stale fragment buffer(s)".format(len(stale)))
+
+    def _now_ms(self):
+        if hasattr(time, "ticks_ms"):
+            return time.ticks_ms()
+        return int(time.time() * 1000)
+
+    def _ticks_diff(self, newer, older):
+        if hasattr(time, "ticks_diff"):
+            return time.ticks_diff(newer, older)
+        return newer - older
 
     def _init_rx_event(self):
         """Create async event primitive when available on current runtime."""
