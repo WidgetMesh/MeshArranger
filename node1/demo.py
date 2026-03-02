@@ -23,7 +23,7 @@ def _init_logger():
         return None
     log = logging.getLogger("node1.demo")
     if hasattr(log, "setLevel"):
-        log.setLevel(logging.INFO)
+        log.setLevel(logging.DEBUG)
     return log
 
 
@@ -69,7 +69,7 @@ def on_message(peer_id, message):
 
 async def run():
     profile = load_profile()
-    mesh = LighthouseMesh()
+    mesh = LighthouseMesh(debug=True)
     transport = mesh.create_transport(default_peer="broadcast")
     endpoint = MessagingEndpoint(node_id=mesh.node_id, transport=transport)
 

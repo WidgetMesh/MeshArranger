@@ -47,6 +47,10 @@ class LighthouseMesh:
         self._logger = None
         self._debug = bool(debug)
         self._init_logger()
+        self._irq_count = 0
+        self._irq_packets_drained = 0
+        self._fallback_recv_count = 0
+        self._fallback_empty_count = 0
 
         # Bring up STA mode so ESP-NOW can operate.
         self.wlan_sta = network.WLAN(network.STA_IF)
@@ -56,7 +60,10 @@ class LighthouseMesh:
         # Canonical node id is the local MAC as lowercase hex.
         self.wlan_mac = self.wlan_sta.config("mac")
         self.node_id = self.mac_to_node_id(self.wlan_mac)
-        self._log_debug("mesh init node_id={}".format(self.node_id))
+        self._log_info(
+            "mesh init node_id={} mac={}".format(self.node_id, self.mac_to_node_id(self.wlan_mac))
+        )
+        self._log_debug("mesh init debug={} peers_arg={}".format(self._debug, peers))
 
         # ESP-NOW transport endpoint.
         self.espnow = aioespnow.AIOESPNow()
@@ -146,12 +153,27 @@ class LighthouseMesh:
         # Fallback in case IRQ has not been set up by platform.
         mac, msg = self.espnow.irecv(timeout_ms=timeout_ms)
         if mac is None or msg is None:
+            self._fallback_empty_count += 1
+            if self._fallback_empty_count <= 3 or (self._fallback_empty_count % 25) == 0:
+                self._log_info(
+                    "recv fallback empty timeout_ms={} irq_count={} queue={} stats={}".format(
+                        timeout_ms, self._irq_count, len(self._rx_queue), self.get_stats()
+                    )
+                )
             return None, None
+        self._fallback_recv_count += 1
         payload = self._ingest_rx_packet(mac, msg)
         if payload is None:
+            self._log_info(
+                "recv fallback fragment peer={} bytes={} awaiting_more".format(
+                    self.mac_to_node_id(mac), len(msg)
+                )
+            )
             return None, None
-        self._log_debug(
-            "recv fallback peer={} bytes={}".format(self.mac_to_node_id(mac), len(payload))
+        self._log_info(
+            "recv fallback packet peer={} bytes={} fallback_recv={} irq_count={}".format(
+                self.mac_to_node_id(mac), len(payload), self._fallback_recv_count, self._irq_count
+            )
         )
         return mac, payload
 
@@ -206,15 +228,23 @@ class LighthouseMesh:
     def enable_interrupt_rx(self):
         """Enable ESP-NOW interrupt callback for incoming packets."""
         self.espnow.irq(self._on_espnow_irq)
-        self._log_debug("interrupt rx enabled")
+        self._log_info("interrupt rx enabled callback={}".format(self._on_espnow_irq))
+        self._log_info("initial espnow stats={}".format(self.get_stats()))
 
     def disable_interrupt_rx(self):
         """Disable ESP-NOW interrupt callback."""
         self.espnow.irq(None)
-        self._log_debug("interrupt rx disabled")
+        self._log_info("interrupt rx disabled")
 
     def _on_espnow_irq(self, *_):
         # ISR entry: move pending frames from driver FIFO into local queue.
+        self._irq_count += 1
+        if self._irq_count <= 5 or (self._irq_count % 25) == 0:
+            self._log_info(
+                "irq entry count={} queue={} stats={}".format(
+                    self._irq_count, len(self._rx_queue), self.get_stats()
+                )
+            )
         self._drain_incoming()
 
     def _drain_incoming(self):
@@ -233,8 +263,18 @@ class LighthouseMesh:
                 self._log_error("rx queue overflow, dropping oldest packet")
             self._rx_queue.append((mac, payload))
             drained += 1
+            self._log_info(
+                "irq packet peer={} raw_bytes={} payload_bytes={} queue={}".format(
+                    self.mac_to_node_id(mac), len(msg), len(payload), len(self._rx_queue)
+                )
+            )
         if drained:
-            self._log_debug("irq drained {} packet(s), queue={}".format(drained, len(self._rx_queue)))
+            self._irq_packets_drained += drained
+            self._log_info(
+                "irq drained {} packet(s) total_drained={} queue={}".format(
+                    drained, self._irq_packets_drained, len(self._rx_queue)
+                )
+            )
         self._signal_rx_event()
 
     def _next_message_id(self):
@@ -388,6 +428,12 @@ class LighthouseMesh:
             return
         if self._debug:
             print("DEBUG LighthouseMesh: {}".format(msg))
+
+    def _log_info(self, msg):
+        if self._logger is not None and hasattr(self._logger, "info"):
+            self._logger.info(msg)
+            return
+        print("INFO LighthouseMesh: {}".format(msg))
 
     def _log_error(self, msg):
         if self._logger is not None and hasattr(self._logger, "error"):
