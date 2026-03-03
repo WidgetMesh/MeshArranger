@@ -25,7 +25,7 @@ except Exception:
 class LighthouseMesh:
     """ESP-NOW mesh adapter with interrupt-driven RX queueing."""
     BROADCAST_TARGET = const(b"\xff\xff\xff\xff\xff\xff")
-    ESPNOW_MAX_PAYLOAD_BYTES = const(250)
+    ESPNOW_MAX_PAYLOAD_BYTES = const(245)
 
     # Fragment header: magic(2) + version(1) + msg_id(2) + total(1) + index(1)
     _FRAG_MAGIC = b"\x7fM"
@@ -47,7 +47,7 @@ class LighthouseMesh:
         # Mirror class constants onto the instance for MicroPython variants
         # that don't reliably resolve class attributes via `self`.
         self.BROADCAST_TARGET = b"\xff\xff\xff\xff\xff\xff"
-        self.ESPNOW_MAX_PAYLOAD_BYTES = 250
+        self.ESPNOW_MAX_PAYLOAD_BYTES = 240
         self._FRAG_MAGIC = b"\x7fM"
         self._FRAG_VERSION = 1
         self._FRAG_HEADER_BYTES = 7
@@ -292,15 +292,12 @@ class LighthouseMesh:
         return self._tx_message_id
 
     def _send_fragmented(self, target, payload):
-        max_payload = self._FRAG_PAYLOAD_MAX_BYTES
-        total = (len(payload) + max_payload - 1) // max_payload
-        if total > 255:
-            raise ValueError("payload too large for fragmentation: {} bytes".format(len(payload)))
+        total = len(payload)
 
         msg_id = self._next_message_id()
         for index in range(total):
-            start = index * max_payload
-            end = start + max_payload
+            start = index * self._FRAG_PAYLOAD_MAX_BYTES
+            end = start + self._FRAG_PAYLOAD_MAX_BYTES
             part = payload[start:end]
             header = bytes(
                 (
