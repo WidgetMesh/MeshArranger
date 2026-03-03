@@ -66,7 +66,7 @@ class LighthouseMesh:
         self.wlan_sta = network.WLAN(network.STA_IF)
         self.wlan_sta.active(True)
         # Optional: Disable power-saving mode for reliable reception
-        self.wlan_sta.config(pm=w0.PM_NONE) 
+        self.wlan_sta.config(pm=self.wlan_sta.PM_NONE) 
 
         # 2. Set the desired channel (e.g., channel 6)  
         # This command must be called BEFORE connecting to an AP if you are using one.
