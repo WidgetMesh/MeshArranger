@@ -292,16 +292,24 @@ class LighthouseMesh:
         return self._tx_message_id
 
     def _send_fragmented(self, target, payload):
-        total = len(payload)
-
+        max_payload = int(self.ESPNOW_MAX_PAYLOAD_BYTES)
+        if max_payload <= 0:
+            raise ValueError("invalid fragment payload size: {}".format(max_payload))
+        total = (len(payload) + max_payload - 1) // max_payload
+        if total > 255:
+            raise ValueError("payload too large for fragmentation: {} bytes".format(len(payload)))
         msg_id = self._next_message_id()
         for index in range(total):
             start = index * self._FRAG_PAYLOAD_MAX_BYTES
             end = start + self._FRAG_PAYLOAD_MAX_BYTES
-            if end > total: end=total
-
             part = payload[start:end]
-            self._log_debug(f"Start: {start} \r\nEnd:{end} \r\nmsgID:{msg_id} \r\nData:{part}")
+            if len(part) == 0:
+                continue
+            self._log_debug(
+                "fragment build id={} idx={}/{} start={} end={} part_bytes={}".format(
+                    msg_id, index, total, start, end, len(part)
+                )
+            )
             
             header = bytes(
                 (
@@ -315,9 +323,7 @@ class LighthouseMesh:
                 )
             )
 
-            self._log_debug(f"Header len {len(header)} Part len: {len(part)}")
-
-
+            self._log_debug("fragment header_bytes={} part_bytes={}".format(len(header), len(part)))
             self.espnow.send(target, header + part)
         self._log_debug(
             "fragmented send target={} bytes={} chunks={}".format(
