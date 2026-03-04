@@ -70,7 +70,7 @@ class LighthouseMesh:
 
         # 2. Set the desired channel (e.g., channel 6)  
         # This command must be called BEFORE connecting to an AP if you are using one.
-        self.wlan_sta.config(channel=6)
+        #self.wlan_sta.config(channel=6)
         self.wlan_sta.disconnect()
 
         # Canonical node id is the local MAC as lowercase hex.
