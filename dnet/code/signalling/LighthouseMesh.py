@@ -354,19 +354,44 @@ class LighthouseMesh:
         if entry is None or entry["total"] != total:
             entry = {"total": total, "parts": {}, "updated_ms": now}
             self._fragment_buffers[key] = entry
+            self._log_info(
+                "rx fragment start peer={} id={} total={}".format(
+                    self.mac_to_node_id(mac), msg_id, total
+                )
+            )
 
+        self._log_debug(
+            "rx fragment part peer={} id={} idx={}/{} bytes={}".format(
+                self.mac_to_node_id(mac), msg_id, index, total, len(part)
+            )
+        )
         entry["parts"][index] = part
         entry["updated_ms"] = now
 
         if len(entry["parts"]) < total:
+            self._log_debug(
+                "rx fragment pending peer={} id={} have={}/{}".format(
+                    self.mac_to_node_id(mac), msg_id, len(entry["parts"]), total
+                )
+            )
             return None
 
         assembled = bytearray()
         for i in range(total):
             if i not in entry["parts"]:
+                self._log_error(
+                    "rx fragment missing peer={} id={} missing_idx={}".format(
+                        self.mac_to_node_id(mac), msg_id, i
+                    )
+                )
                 return None
             assembled.extend(entry["parts"][i])
         del self._fragment_buffers[key]
+        self._log_info(
+            "rx fragment assembled peer={} id={} bytes={}".format(
+                self.mac_to_node_id(mac), msg_id, len(assembled)
+            )
+        )
         return bytes(assembled)
 
     def _parse_fragment(self, msg):

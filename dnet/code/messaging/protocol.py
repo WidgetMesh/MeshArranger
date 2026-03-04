@@ -77,13 +77,30 @@ class MessagingEndpoint:
         if payload is None:
             return None, None
 
-        message = self.codec.decode(payload)
+        try:
+            message = self.codec.decode(payload)
+        except Exception as exc:
+            raw_len = len(payload) if hasattr(payload, "__len__") else -1
+            preview = payload[:80] if isinstance(payload, (str, bytes, bytearray)) else payload
+            self._log_debug(
+                "poll decode failed peer={} bytes={} preview={} err={}".format(
+                    peer_id, raw_len, preview, exc
+                )
+            )
+            raise
         mtype = message[schema.F_TYPE]
+        self._log_debug("poll decoded peer={} type={} bytes={}".format(peer_id, mtype, len(payload)))
 
         if mtype == schema.TYPE_ADVERTISE:
             self.registry.register_advertisement(message)
+            self._log_debug("registry updated advertise node={}".format(message.get(schema.F_NODE_ID)))
         elif mtype == schema.TYPE_PROFILE:
             self.registry.register_profile(message)
+            self._log_debug(
+                "registry updated profile node={} services={}".format(
+                    message.get(schema.F_NODE_ID), len(message.get(schema.F_SERVICES, []))
+                )
+            )
 
         return peer_id, message
 
