@@ -33,6 +33,8 @@ class LighthouseMesh:
     _FRAG_HEADER_BYTES = const(7)
     _FRAG_PAYLOAD_MAX_BYTES = const(ESPNOW_MAX_PAYLOAD_BYTES - _FRAG_HEADER_BYTES)
     _FRAG_REASSEMBLY_TIMEOUT_MS = const(30000)
+    _TX_ACK_TIMEOUT_MS = const(1200)
+    _TX_QUEUE_MAX_FRAMES = const(96)
     DEFAULT_CHANNEL = const(6)
 
     _instance = None
@@ -53,6 +55,8 @@ class LighthouseMesh:
         self._FRAG_VERSION = 1
         self._FRAG_HEADER_BYTES = 7
         self._FRAG_REASSEMBLY_TIMEOUT_MS = 30000
+        self._TX_ACK_TIMEOUT_MS = 1200
+        self._TX_QUEUE_MAX_FRAMES = 96
         self._logger = None
         self._debug = bool(debug)
         self._init_logger()
@@ -62,6 +66,15 @@ class LighthouseMesh:
         self._irq_packets_drained = 0
         self._fallback_recv_count = 0
         self._fallback_empty_count = 0
+        self._tx_queue = []
+        self._tx_inflight = None
+        self._tx_queued_frames = 0
+        self._tx_sent_frames = 0
+        self._tx_ack_ok = 0
+        self._tx_ack_fail = 0
+        self._tx_ack_timeout = 0
+        self._tx_stat_tx_responses = 0
+        self._tx_stat_tx_failures = 0
 
         if channel is None:
             channel = int(self.DEFAULT_CHANNEL)
@@ -86,6 +99,9 @@ class LighthouseMesh:
         # ESP-NOW transport endpoint.
         self.espnow = aioespnow.AIOESPNow()
         self.espnow.active(True)
+        stats = self.get_stats()
+        self._tx_stat_tx_responses = int(stats[1])
+        self._tx_stat_tx_failures = int(stats[2])
 
         # Peer cache and IRQ->async receive buffering.
         self._known_peers = set()
@@ -167,7 +183,7 @@ class LighthouseMesh:
             payload = payload.encode("utf-8")
         try:
             if len(payload) <= self.ESPNOW_MAX_PAYLOAD_BYTES:
-                self.espnow.send(target, payload)
+                self.espnow.send(target, payload, False)
             else:
                 self._send_fragmented(target, payload)
         except Exception as exc:
@@ -277,7 +293,8 @@ class LighthouseMesh:
         self._log_info("interrupt rx disabled")
 
     def _on_espnow_irq(self, *_):
-        self._log_debug("RX")
+        # ESPNow.irq() on this port fires on RX events; we also use this wakeup
+        # to update TX completion state and drain queued fragments.
         # ISR entry: move pending frames from driver FIFO into local queue.
         self._irq_count += 1
         if self._irq_count <= 5 or (self._irq_count % 25) == 0:
@@ -287,6 +304,7 @@ class LighthouseMesh:
                 )
             )
         self._drain_incoming()
+        self._pump_tx_queue(source="irq")
 
     def _drain_incoming(self):
         """Drain all immediately available packets from ESP-NOW."""
@@ -323,16 +341,17 @@ class LighthouseMesh:
         return self._tx_message_id
 
     def _send_fragmented(self, target, payload):
-        max_payload = int(self.ESPNOW_MAX_PAYLOAD_BYTES)
+        max_payload = int(self._FRAG_PAYLOAD_MAX_BYTES)
         if max_payload <= 0:
             raise ValueError("invalid fragment payload size: {}".format(max_payload))
         total = (len(payload) + max_payload - 1) // max_payload
         if total > 255:
             raise ValueError("payload too large for fragmentation: {} bytes".format(len(payload)))
         msg_id = self._next_message_id()
+        queued = 0
         for index in range(total):
-            start = index * self._FRAG_PAYLOAD_MAX_BYTES
-            end = start + self._FRAG_PAYLOAD_MAX_BYTES
+            start = index * max_payload
+            end = start + max_payload
             part = payload[start:end]
             if len(part) == 0:
                 continue
@@ -355,10 +374,20 @@ class LighthouseMesh:
             )
 
             self._log_debug("fragment header_bytes={} part_bytes={}".format(len(header), len(part)))
-            self.espnow.send(target, header + part)
+            self._enqueue_tx_frame(
+                {
+                    "target": target,
+                    "msg_id": msg_id,
+                    "index": index,
+                    "total": total,
+                    "data": header + part,
+                }
+            )
+            queued += 1
+        self._pump_tx_queue(source="fragment-send")
         self._log_debug(
-            "fragmented send target={} bytes={} chunks={}".format(
-                self.mac_to_node_id(target), len(payload), total
+            "fragmented queued target={} bytes={} chunks={} queued={} qlen={}".format(
+                self.mac_to_node_id(target), len(payload), total, queued, len(self._tx_queue)
             )
         )
 
@@ -475,6 +504,7 @@ class LighthouseMesh:
 
     async def _wait_for_rx(self, poll_ms):
         """Wait for queued data/event, otherwise sleep for poll interval."""
+        self._pump_tx_queue(source="wait-loop")
         if self._rx_queue:
             return
         if self._rx_event is not None:
@@ -495,6 +525,108 @@ class LighthouseMesh:
             await asyncio.sleep_ms(poll_ms)
         except AttributeError:
             await asyncio.sleep(poll_ms / 1000.0)
+        self._pump_tx_queue(source="wait-sleep")
+
+    def _enqueue_tx_frame(self, frame):
+        if len(self._tx_queue) >= self._TX_QUEUE_MAX_FRAMES:
+            dropped = self._tx_queue.pop(0)
+            self._log_error(
+                "tx queue overflow dropping id={} idx={}/{}".format(
+                    dropped.get("msg_id"), dropped.get("index"), dropped.get("total")
+                )
+            )
+        self._tx_queue.append(frame)
+        self._tx_queued_frames += 1
+
+    def _pump_tx_queue(self, source):
+        # Update completion status for prior async send.
+        self._update_tx_completion()
+
+        # Timeout protection in case send callbacks are never delivered.
+        if self._tx_inflight is not None:
+            elapsed = self._ticks_diff(self._now_ms(), self._tx_inflight["sent_ms"])
+            if elapsed > self._TX_ACK_TIMEOUT_MS:
+                timed_out = self._tx_inflight
+                self._tx_inflight = None
+                self._tx_ack_timeout += 1
+                self._log_error(
+                    "tx timeout id={} idx={}/{} elapsed_ms={}".format(
+                        timed_out["msg_id"], timed_out["index"], timed_out["total"], elapsed
+                    )
+                )
+            else:
+                return
+
+        if not self._tx_queue:
+            return
+
+        frame = self._tx_queue[0]
+        try:
+            self.espnow.send(frame["target"], frame["data"], False)
+        except Exception as exc:
+            self._log_error(
+                "tx send failed id={} idx={}/{} err={}".format(
+                    frame.get("msg_id"), frame.get("index"), frame.get("total"), exc
+                )
+            )
+            # Drop on hard error so queue can continue draining.
+            self._tx_queue.pop(0)
+            return
+
+        self._tx_queue.pop(0)
+        self._tx_sent_frames += 1
+        self._tx_inflight = {
+            "msg_id": frame["msg_id"],
+            "index": frame["index"],
+            "total": frame["total"],
+            "sent_ms": self._now_ms(),
+        }
+        self._log_debug(
+            "tx queued->sent id={} idx={}/{} qlen={} src={}".format(
+                frame["msg_id"], frame["index"], frame["total"], len(self._tx_queue), source
+            )
+        )
+
+    def _update_tx_completion(self):
+        stats = self.get_stats()
+        resp = int(stats[1])
+        fail = int(stats[2])
+        d_resp = resp - self._tx_stat_tx_responses
+        d_fail = fail - self._tx_stat_tx_failures
+        if d_resp < 0:
+            d_resp = 0
+        if d_fail < 0:
+            d_fail = 0
+
+        if d_resp == 0 and d_fail == 0:
+            return
+
+        self._tx_stat_tx_responses = resp
+        self._tx_stat_tx_failures = fail
+        if self._tx_inflight is not None:
+            done = self._tx_inflight
+            self._tx_inflight = None
+            if d_fail > 0:
+                self._tx_ack_fail += 1
+                self._log_error(
+                    "tx ack fail id={} idx={}/{} resp_delta={} fail_delta={}".format(
+                        done["msg_id"], done["index"], done["total"], d_resp, d_fail
+                    )
+                )
+            else:
+                self._tx_ack_ok += 1
+                self._log_debug(
+                    "tx ack ok id={} idx={}/{} resp_delta={} qlen={}".format(
+                        done["msg_id"], done["index"], done["total"], d_resp, len(self._tx_queue)
+                    )
+                )
+        else:
+            # Stats changed without an in-flight frame tracked. Keep telemetry.
+            self._log_debug(
+                "tx stats advanced with no inflight resp_delta={} fail_delta={} qlen={}".format(
+                    d_resp, d_fail, len(self._tx_queue)
+                )
+            )
 
     def _configure_wifi_for_espnow(self, channel):
         """Set deterministic STA settings used by ESP-NOW."""
