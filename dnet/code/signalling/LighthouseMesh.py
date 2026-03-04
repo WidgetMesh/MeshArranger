@@ -95,7 +95,7 @@ class LighthouseMesh:
         self.use_broadcast = True
         self.default_peer = self.BROADCAST_TARGET
 
-   #     self.add_peer(self.BROADCAST_TARGET)
+        self.add_peer(self.BROADCAST_TARGET)
 
         # Async event is signaled by ISR drain when new packets arrive.
         self._init_rx_event()
