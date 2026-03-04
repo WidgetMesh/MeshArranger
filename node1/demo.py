@@ -28,6 +28,7 @@ PROFILE_INTERVAL_S = 15
 START_JITTER_MS = 1200
 LOOP_JITTER_MS = 400
 MESH_CHANNEL = 6
+ENABLE_TX = True
 
 
 def _init_logger():
@@ -127,15 +128,18 @@ def on_message(peer_id, message):
 async def run():
     profile = load_profile()
     _log_info(
-        "demo config channel={} advertise_s={} profile_s={}".format(
-            MESH_CHANNEL, ADVERTISE_INTERVAL_S, PROFILE_INTERVAL_S
+        "demo config channel={} advertise_s={} profile_s={} enable_tx={}".format(
+            MESH_CHANNEL, ADVERTISE_INTERVAL_S, PROFILE_INTERVAL_S, ENABLE_TX
         )
     )
     mesh = LighthouseMesh(debug=True, channel=MESH_CHANNEL)
     transport = mesh.create_transport(default_peer="broadcast")
     endpoint = MessagingEndpoint(node_id=mesh.node_id, transport=transport)
 
-    asyncio.create_task(broadcast_loop(endpoint, profile))
+    if ENABLE_TX:
+        asyncio.create_task(broadcast_loop(endpoint, profile))
+    else:
+        _log_info("TX disabled; running receive-only")
     await mesh.run(endpoint=endpoint, on_message=on_message, poll_ms=25)
 
 
