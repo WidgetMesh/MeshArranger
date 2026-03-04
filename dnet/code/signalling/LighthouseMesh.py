@@ -98,6 +98,11 @@ class LighthouseMesh:
         self.default_peer = self.BROADCAST_TARGET
 
         self.add_peer(self.BROADCAST_TARGET)
+        try:
+            if hasattr(self.espnow, "get_peers"):
+                self._log_info("mesh peers={}".format(self.espnow.get_peers()))
+        except Exception as exc:
+            self._log_debug("mesh get_peers unavailable err={}".format(exc))
 
         # Async event is signaled by ISR drain when new packets arrive.
         self._init_rx_event()
@@ -187,8 +192,12 @@ class LighthouseMesh:
             self._fallback_empty_count += 1
             if self._fallback_empty_count <= 3 or (self._fallback_empty_count % 25) == 0:
                 self._log_info(
-                    "recv fallback empty timeout_ms={} irq_count={} queue={} stats={}".format(
-                        timeout_ms, self._irq_count, len(self._rx_queue), self.get_stats()
+                    "recv fallback empty timeout_ms={} irq_count={} queue={} stats={} ch={}".format(
+                        timeout_ms,
+                        self._irq_count,
+                        len(self._rx_queue),
+                        self.get_stats(),
+                        self._read_wifi_channel(),
                     )
                 )
             return None, None

@@ -29,6 +29,9 @@ START_JITTER_MS = 1200
 LOOP_JITTER_MS = 400
 MESH_CHANNEL = 6
 ENABLE_TX = True
+# Set to receiver node_id (12 hex chars) to force unicast test.
+# Keep as None to use broadcast.
+TARGET_PEER_ID = None
 
 
 def _init_logger():
@@ -57,7 +60,7 @@ def load_profile(path=PROFILE_PATH):
 
 def send_profile_broadcast(endpoint, profile):
     payload = endpoint.send_profile(
-        peer_id="broadcast",
+        peer_id=None,
         profile_hash=profile["h"],
         services=profile["s"],
         name=profile.get("name"),
@@ -70,7 +73,7 @@ def send_profile_broadcast(endpoint, profile):
 def send_advertise_broadcast(endpoint, profile):
     service_ids = [int(entry.get("sid")) for entry in profile.get("s", []) if "sid" in entry]
     payload = endpoint.send_advertise(
-        peer_id="broadcast",
+        peer_id=None,
         profile_hash=profile["h"],
         service_ids=service_ids,
     )
@@ -127,13 +130,14 @@ def on_message(peer_id, message):
 
 async def run():
     profile = load_profile()
+    default_peer = TARGET_PEER_ID if TARGET_PEER_ID else "broadcast"
     _log_info(
-        "demo config channel={} advertise_s={} profile_s={} enable_tx={}".format(
-            MESH_CHANNEL, ADVERTISE_INTERVAL_S, PROFILE_INTERVAL_S, ENABLE_TX
+        "demo config channel={} advertise_s={} profile_s={} enable_tx={} peer={}".format(
+            MESH_CHANNEL, ADVERTISE_INTERVAL_S, PROFILE_INTERVAL_S, ENABLE_TX, default_peer
         )
     )
     mesh = LighthouseMesh(debug=True, channel=MESH_CHANNEL)
-    transport = mesh.create_transport(default_peer="broadcast")
+    transport = mesh.create_transport(default_peer=default_peer)
     endpoint = MessagingEndpoint(node_id=mesh.node_id, transport=transport)
 
     if ENABLE_TX:
