@@ -114,6 +114,12 @@ class LighthouseMesh:
         self.default_peer = self.BROADCAST_TARGET
 
         self.add_peer(self.BROADCAST_TARGET)
+        if peers:
+            try:
+                for peer in peers:
+                    self.add_peer(peer)
+            except Exception as exc:
+                self._log_error("initial peer add failed err={}".format(exc))
         try:
             if hasattr(self.espnow, "get_peers"):
                 self._log_info("mesh peers={}".format(self.espnow.get_peers()))
@@ -293,6 +299,7 @@ class LighthouseMesh:
         self._log_info("interrupt rx disabled")
 
     def _on_espnow_irq(self, *_):
+        print("RX")
         # ESPNow.irq() on this port fires on RX events; we also use this wakeup
         # to update TX completion state and drain queued fragments.
         # ISR entry: move pending frames from driver FIFO into local queue.
@@ -562,6 +569,7 @@ class LighthouseMesh:
 
         frame = self._tx_queue[0]
         try:
+            print(str(frame))
             self.espnow.send(frame["target"], frame["data"], False)
         except Exception as exc:
             self._log_error(

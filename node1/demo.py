@@ -131,12 +131,15 @@ def on_message(peer_id, message):
 async def run():
     profile = load_profile()
     default_peer = TARGET_PEER_ID if TARGET_PEER_ID else "broadcast"
+    peers = [TARGET_PEER_ID] if TARGET_PEER_ID else None
     _log_info(
         "demo config channel={} advertise_s={} profile_s={} enable_tx={} peer={}".format(
             MESH_CHANNEL, ADVERTISE_INTERVAL_S, PROFILE_INTERVAL_S, ENABLE_TX, default_peer
         )
     )
-    mesh = LighthouseMesh(debug=True, channel=MESH_CHANNEL)
+    mesh = LighthouseMesh(debug=True, channel=MESH_CHANNEL, peers=peers)
+    if TARGET_PEER_ID:
+        _log_info("pre-added peer {}".format(TARGET_PEER_ID))
     transport = mesh.create_transport(default_peer=default_peer)
     endpoint = MessagingEndpoint(node_id=mesh.node_id, transport=transport)
 
