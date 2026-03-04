@@ -253,6 +253,7 @@ class LighthouseMesh:
         self._log_info("interrupt rx disabled")
 
     def _on_espnow_irq(self, *_):
+        self._log_debug("RX")
         # ISR entry: move pending frames from driver FIFO into local queue.
         self._irq_count += 1
         if self._irq_count <= 5 or (self._irq_count % 25) == 0:
