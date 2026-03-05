@@ -27,3 +27,10 @@ except:
 
 from dnet.signalling.LighthouseMesh import LighthouseMesh
 from dnet.signalling.Payload import Payload
+from .RestInterface import RestInterface
+
+__all__ = [
+    "LighthouseMesh",
+    "Payload",
+    "RestInterface",
+]
