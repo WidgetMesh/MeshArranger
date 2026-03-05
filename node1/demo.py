@@ -1,12 +1,4 @@
 import json
-try:
-    import utime as time
-except Exception:
-    import time
-try:
-    import urandom as random
-except Exception:
-    import random
 
 try:
     import uasyncio as asyncio
@@ -23,15 +15,8 @@ from dnet.signalling.LighthouseMesh import LighthouseMesh
 
 
 PROFILE_PATH = "/lib/profile.json"
-ADVERTISE_INTERVAL_S = 2
-PROFILE_INTERVAL_S = 15
-START_JITTER_MS = 1200
-LOOP_JITTER_MS = 400
+BROADCAST_INTERVAL_S = 5
 MESH_CHANNEL = 6
-ENABLE_TX = True
-# Set to receiver node_id (12 hex chars) to force unicast test.
-# Keep as None to use broadcast.
-TARGET_PEER_ID = None
 
 
 def _init_logger():
@@ -39,7 +24,7 @@ def _init_logger():
         return None
     log = logging.getLogger("node1.demo")
     if hasattr(log, "setLevel"):
-        log.setLevel(logging.DEBUG)
+        log.setLevel(logging.INFO)
     return log
 
 
@@ -60,7 +45,7 @@ def load_profile(path=PROFILE_PATH):
 
 def send_profile_broadcast(endpoint, profile):
     payload = endpoint.send_profile(
-        peer_id=None,
+        peer_id="broadcast",
         profile_hash=profile["h"],
         services=profile["s"],
         name=profile.get("name"),
@@ -70,83 +55,31 @@ def send_profile_broadcast(endpoint, profile):
     )
     _log_info("broadcasted profile ({} bytes)".format(len(payload)))
 
-def send_advertise_broadcast(endpoint, profile):
-    service_ids = [int(entry.get("sid")) for entry in profile.get("s", []) if "sid" in entry]
-    payload = endpoint.send_advertise(
-        peer_id=None,
-        profile_hash=profile["h"],
-        service_ids=service_ids,
-    )
-    _log_info("broadcasted advertise ({} bytes, services={})".format(len(payload), len(service_ids)))
-
-def _rand_ms(max_ms):
-    if max_ms <= 0:
-        return 0
-    try:
-        if hasattr(random, "getrandbits"):
-            return random.getrandbits(16) % max_ms
-        if hasattr(random, "randrange"):
-            return random.randrange(max_ms)
-        if hasattr(random, "randint"):
-            return random.randint(0, max_ms - 1)
-    except Exception:
-        pass
-    return 0
-
-def _now_ms():
-    if hasattr(time, "ticks_ms"):
-        return time.ticks_ms()
-    return int(time.time() * 1000)
-
-def _elapsed_ms(now, then):
-    if hasattr(time, "ticks_diff"):
-        return time.ticks_diff(now, then)
-    return now - then
-
 
 async def broadcast_loop(endpoint, profile):
-    # Add startup jitter so two identical nodes are less likely to stay in lock-step.
-    await asyncio.sleep_ms(_rand_ms(START_JITTER_MS))
-    last_adv_ms = 0
-    last_profile_ms = 0
     while True:
-        now = _now_ms()
-        if _elapsed_ms(now, last_adv_ms) >= (ADVERTISE_INTERVAL_S * 1000):
-            send_advertise_broadcast(endpoint, profile)
-            last_adv_ms = now
-        if _elapsed_ms(now, last_profile_ms) >= (PROFILE_INTERVAL_S * 1000):
-            send_profile_broadcast(endpoint, profile)
-            last_profile_ms = now
-        await asyncio.sleep_ms(200 + _rand_ms(LOOP_JITTER_MS))
+        send_profile_broadcast(endpoint, profile)
+        await asyncio.sleep(BROADCAST_INTERVAL_S)
 
 
 def on_message(peer_id, message):
-    mtype = message.get("t")
-    if mtype == "p":
-        _log_info("profile from {}: {}".format(peer_id, message))
+    if message.get("t") != "p":
         return
-    _log_info("message from {}: type={} body={}".format(peer_id, mtype, message))
+    _log_info("profile from {}: {}".format(peer_id, message))
 
 
 async def run():
     profile = load_profile()
-    default_peer = TARGET_PEER_ID if TARGET_PEER_ID else "broadcast"
-    peers = [TARGET_PEER_ID] if TARGET_PEER_ID else None
     _log_info(
-        "demo config channel={} advertise_s={} profile_s={} enable_tx={} peer={}".format(
-            MESH_CHANNEL, ADVERTISE_INTERVAL_S, PROFILE_INTERVAL_S, ENABLE_TX, default_peer
+        "demo config channel={} interval_s={}".format(
+            MESH_CHANNEL, BROADCAST_INTERVAL_S
         )
     )
-    mesh = LighthouseMesh(debug=True, channel=MESH_CHANNEL, peers=peers)
-    if TARGET_PEER_ID:
-        _log_info("pre-added peer {}".format(TARGET_PEER_ID))
-    transport = mesh.create_transport(default_peer=default_peer)
+    mesh = LighthouseMesh(channel=MESH_CHANNEL)
+    transport = mesh.create_transport(default_peer="broadcast")
     endpoint = MessagingEndpoint(node_id=mesh.node_id, transport=transport)
 
-    if ENABLE_TX:
-        asyncio.create_task(broadcast_loop(endpoint, profile))
-    else:
-        _log_info("TX disabled; running receive-only")
+    asyncio.create_task(broadcast_loop(endpoint, profile))
     await mesh.run(endpoint=endpoint, on_message=on_message, poll_ms=25)
 
 

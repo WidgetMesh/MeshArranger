@@ -64,8 +64,6 @@ class LighthouseMesh:
         self._FRAG_PAYLOAD_MAX_BYTES = int(self.ESPNOW_MAX_PAYLOAD_BYTES) - int(self._FRAG_HEADER_BYTES)
         self._irq_count = 0
         self._irq_packets_drained = 0
-        self._fallback_recv_count = 0
-        self._fallback_empty_count = 0
         self._tx_queue = []
         self._tx_inflight = None
         self._tx_queued_frames = 0
@@ -211,32 +209,10 @@ class LighthouseMesh:
         # Fallback in case IRQ has not been set up by platform.
         mac, msg = self.espnow.irecv(timeout_ms=timeout_ms)
         if mac is None or msg is None:
-            self._fallback_empty_count += 1
-            if self._fallback_empty_count <= 3 or (self._fallback_empty_count % 25) == 0:
-                self._log_info(
-                    "recv fallback empty timeout_ms={} irq_count={} queue={} stats={} ch={}".format(
-                        timeout_ms,
-                        self._irq_count,
-                        len(self._rx_queue),
-                        self.get_stats(),
-                        self._read_wifi_channel(),
-                    )
-                )
             return None, None
-        self._fallback_recv_count += 1
         payload = self._ingest_rx_packet(mac, msg)
         if payload is None:
-            self._log_info(
-                "recv fallback fragment peer={} bytes={} awaiting_more".format(
-                    self.mac_to_node_id(mac), len(msg)
-                )
-            )
             return None, None
-        self._log_info(
-            "recv fallback packet peer={} bytes={} fallback_recv={} irq_count={}".format(
-                self.mac_to_node_id(mac), len(payload), self._fallback_recv_count, self._irq_count
-            )
-        )
         return mac, payload
 
     def create_transport(self, default_peer=None):
@@ -299,17 +275,10 @@ class LighthouseMesh:
         self._log_info("interrupt rx disabled")
 
     def _on_espnow_irq(self, *_):
-        print("RX")
         # ESPNow.irq() on this port fires on RX events; we also use this wakeup
         # to update TX completion state and drain queued fragments.
         # ISR entry: move pending frames from driver FIFO into local queue.
         self._irq_count += 1
-        if self._irq_count <= 5 or (self._irq_count % 25) == 0:
-            self._log_info(
-                "irq entry count={} queue={} stats={}".format(
-                    self._irq_count, len(self._rx_queue), self.get_stats()
-                )
-            )
         self._drain_incoming()
         self._pump_tx_queue(source="irq")
 
@@ -329,18 +298,8 @@ class LighthouseMesh:
                 self._log_error("rx queue overflow, dropping oldest packet")
             self._rx_queue.append((mac, payload))
             drained += 1
-            self._log_info(
-                "irq packet peer={} raw_bytes={} payload_bytes={} queue={}".format(
-                    self.mac_to_node_id(mac), len(msg), len(payload), len(self._rx_queue)
-                )
-            )
         if drained:
             self._irq_packets_drained += drained
-            self._log_info(
-                "irq drained {} packet(s) total_drained={} queue={}".format(
-                    drained, self._irq_packets_drained, len(self._rx_queue)
-                )
-            )
         self._signal_rx_event()
 
     def _next_message_id(self):
@@ -362,12 +321,6 @@ class LighthouseMesh:
             part = payload[start:end]
             if len(part) == 0:
                 continue
-            self._log_debug(
-                "fragment build id={} idx={}/{} start={} end={} part_bytes={}".format(
-                    msg_id, index, total, start, end, len(part)
-                )
-            )
-            
             header = bytes(
                 (
                     self._FRAG_MAGIC[0],
@@ -379,8 +332,6 @@ class LighthouseMesh:
                     index,
                 )
             )
-
-            self._log_debug("fragment header_bytes={} part_bytes={}".format(len(header), len(part)))
             self._enqueue_tx_frame(
                 {
                     "target": target,
@@ -393,8 +344,8 @@ class LighthouseMesh:
             queued += 1
         self._pump_tx_queue(source="fragment-send")
         self._log_debug(
-            "fragmented queued target={} bytes={} chunks={} queued={} qlen={}".format(
-                self.mac_to_node_id(target), len(payload), total, queued, len(self._tx_queue)
+            "fragmented queued target={} bytes={} chunks={}".format(
+                self.mac_to_node_id(target), len(payload), queued
             )
         )
 
@@ -413,26 +364,10 @@ class LighthouseMesh:
         if entry is None or entry["total"] != total:
             entry = {"total": total, "parts": {}, "updated_ms": now}
             self._fragment_buffers[key] = entry
-            self._log_info(
-                "rx fragment start peer={} id={} total={}".format(
-                    self.mac_to_node_id(mac), msg_id, total
-                )
-            )
-
-        self._log_debug(
-            "rx fragment part peer={} id={} idx={}/{} bytes={}".format(
-                self.mac_to_node_id(mac), msg_id, index, total, len(part)
-            )
-        )
         entry["parts"][index] = part
         entry["updated_ms"] = now
 
         if len(entry["parts"]) < total:
-            self._log_debug(
-                "rx fragment pending peer={} id={} have={}/{}".format(
-                    self.mac_to_node_id(mac), msg_id, len(entry["parts"]), total
-                )
-            )
             return None
 
         assembled = bytearray()
@@ -446,11 +381,6 @@ class LighthouseMesh:
                 return None
             assembled.extend(entry["parts"][i])
         del self._fragment_buffers[key]
-        self._log_info(
-            "rx fragment assembled peer={} id={} bytes={}".format(
-                self.mac_to_node_id(mac), msg_id, len(assembled)
-            )
-        )
         return bytes(assembled)
 
     def _parse_fragment(self, msg):
@@ -569,7 +499,6 @@ class LighthouseMesh:
 
         frame = self._tx_queue[0]
         try:
-            print(str(frame))
             self.espnow.send(frame["target"], frame["data"], False)
         except Exception as exc:
             self._log_error(
@@ -623,18 +552,6 @@ class LighthouseMesh:
                 )
             else:
                 self._tx_ack_ok += 1
-                self._log_debug(
-                    "tx ack ok id={} idx={}/{} resp_delta={} qlen={}".format(
-                        done["msg_id"], done["index"], done["total"], d_resp, len(self._tx_queue)
-                    )
-                )
-        else:
-            # Stats changed without an in-flight frame tracked. Keep telemetry.
-            self._log_debug(
-                "tx stats advanced with no inflight resp_delta={} fail_delta={} qlen={}".format(
-                    d_resp, d_fail, len(self._tx_queue)
-                )
-            )
 
     def _configure_wifi_for_espnow(self, channel):
         """Set deterministic STA settings used by ESP-NOW."""

@@ -2,11 +2,6 @@ import time
 
 from . import schema
 
-try:
-    import logging
-except Exception:
-    logging = None
-
 
 class ServiceRegistry:
     """
@@ -17,12 +12,6 @@ class ServiceRegistry:
     def __init__(self):
         self._nodes = {}
         self._service_to_nodes = {}
-        self._logger = None
-        if logging is not None:
-            try:
-                self._logger = logging.getLogger("dnet.messaging.registry")
-            except Exception:
-                self._logger = None
 
     def register_advertisement(self, msg, seen_at_ms=None):
         node_id = msg[schema.F_NODE_ID]
@@ -42,11 +31,6 @@ class ServiceRegistry:
             providers = self._service_to_nodes.get(service_id, set())
             providers.add(node_id)
             self._service_to_nodes[service_id] = providers
-        self._log_debug(
-            "register_advertisement node={} services={} total_nodes={}".format(
-                node_id, len(services), len(self._nodes)
-            )
-        )
 
     def register_profile(self, msg, seen_at_ms=None):
         node_id = msg[schema.F_NODE_ID]
@@ -69,11 +53,6 @@ class ServiceRegistry:
             providers = self._service_to_nodes.get(service_id, set())
             providers.add(node_id)
             self._service_to_nodes[service_id] = providers
-        self._log_debug(
-            "register_profile node={} services={} total_nodes={}".format(
-                node_id, len(node["service_ids"]), len(self._nodes)
-            )
-        )
 
     def find_service(self, service_id):
         """
@@ -107,9 +86,3 @@ class ServiceRegistry:
     @staticmethod
     def _now_ms():
         return int(time.time() * 1000)
-
-    def _log_debug(self, msg):
-        if self._logger is not None and hasattr(self._logger, "debug"):
-            self._logger.debug(msg)
-            return
-        print("DEBUG ServiceRegistry: {}".format(msg))
