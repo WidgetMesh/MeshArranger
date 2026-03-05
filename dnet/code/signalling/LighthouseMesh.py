@@ -555,11 +555,26 @@ class LighthouseMesh:
 
     def _configure_wifi_for_espnow(self, channel):
         """Set deterministic STA settings used by ESP-NOW."""
+        sta_connected = False
         try:
-            # Keep STA detached from AP before channel operations.
-            self.wlan_sta.disconnect()
+            sta_connected = bool(self.wlan_sta.isconnected())
         except Exception:
-            pass
+            sta_connected = False
+
+        if sta_connected:
+            current_channel = self._read_wifi_channel()
+            if isinstance(current_channel, int) and int(current_channel) != int(channel):
+                self._log_info(
+                    "wifi STA connected on channel {}; ignoring requested channel {}".format(
+                        int(current_channel), int(channel)
+                    )
+                )
+            else:
+                self._log_info(
+                    "wifi STA already connected; keeping channel {}".format(current_channel)
+                )
+            return
+
         try:
             pm_none = getattr(self.wlan_sta, "PM_NONE", None)
             if pm_none is None:
