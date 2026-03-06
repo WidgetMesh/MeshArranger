@@ -186,7 +186,7 @@ class RestInterface:
     def start(self):
         self._mesh_task = None
         try:
-            self._mesh_task = asyncio.create_task(self.mesh.run())
+            self._mesh_task = asyncio.create_task(self.mesh.run(endpoint=self.endpoint))
             print("RestInterface: mesh background task started via asyncio.create_task()")
         except Exception as exc:
             print(
@@ -196,7 +196,7 @@ class RestInterface:
             )
             try:
                 loop = asyncio.get_event_loop()
-                self._mesh_task = loop.create_task(self.mesh.run())
+                self._mesh_task = loop.create_task(self.mesh.run(endpoint=self.endpoint))
                 print("RestInterface: mesh background task started via event loop")
             except Exception as fallback_exc:
                 print(
