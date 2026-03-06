@@ -165,7 +165,7 @@ class RestInterface:
         except TypeError:
             try:
                 self.server.start(port=self.port)
-        except TypeError:
+            except TypeError:
                 self.server.start()
 
     def stop(self):
