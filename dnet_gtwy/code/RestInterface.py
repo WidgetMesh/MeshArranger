@@ -15,10 +15,12 @@ from dnet.signalling.LighthouseMesh import LighthouseMesh
 
 class RestInterface:
     def __init__(self, mesh=None, endpoint=None, channel=6, host="0.0.0.0", port=80):
-        print("RestInterface: __init__ host={} port={} channel={}".format(host, port, channel))
+        self.channel = int(channel)
+        print("RestInterface: __init__ host={} port={} channel={}".format(host, port, self.channel))
         self.host = host
         self.port = int(port)
-        self.mesh = mesh or LighthouseMesh(channel=channel)
+        self.mesh = mesh or LighthouseMesh(channel=self.channel)
+        self._ensure_mesh_channel()
         if endpoint is None:
             transport = self.mesh.create_transport(default_peer="broadcast")
             endpoint = MessagingEndpoint(node_id=self.mesh.node_id, transport=transport)
@@ -26,6 +28,43 @@ class RestInterface:
         self.server = MicroPyServer()
         self._mesh_task = None
         self.setup_routes()
+
+    def _ensure_mesh_channel(self):
+        if self.mesh is None:
+            return
+        try:
+            requested_channel = int(self.channel)
+        except Exception:
+            return
+        try:
+            current_channel = self.mesh._read_wifi_channel()
+            current_channel_int = int(current_channel)
+        except Exception:
+            current_channel_int = None
+            current_channel = None
+
+        if current_channel_int == requested_channel:
+            return
+        try:
+            print(
+                "RestInterface: forcing mesh channel {} (current {})".format(
+                    requested_channel, current_channel
+                )
+            )
+            configure = getattr(self.mesh, "_configure_wifi_for_espnow", None)
+            if configure is not None:
+                configure(requested_channel)
+            if hasattr(self.mesh, "_peer_channel"):
+                self.mesh._peer_channel = requested_channel
+            print(
+                "RestInterface: mesh channel set to {}".format(requested_channel)
+            )
+        except Exception as exc:
+            print(
+                "RestInterface: could not force mesh channel {} ({})".format(
+                    requested_channel, exc
+                )
+            )
 
     def setup_routes(self):
         print("RestInterface: registering routes")
@@ -157,8 +196,7 @@ class RestInterface:
         )
         print("GET /health")
         print("GET /status")
-        print("GET /espnow/status")
-        print("GET /nodes")
+j        print("GET /nodes")
         try:
             # Prefer explicit bind when supported by the server implementation.
             self.server.start(self.host, self.port)

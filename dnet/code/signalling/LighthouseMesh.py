@@ -555,6 +555,7 @@ class LighthouseMesh:
 
     def _configure_wifi_for_espnow(self, channel):
         """Set deterministic STA settings used by ESP-NOW."""
+        requested_channel = int(channel)
         sta_connected = False
         try:
             sta_connected = bool(self.wlan_sta.isconnected())
@@ -563,17 +564,29 @@ class LighthouseMesh:
 
         if sta_connected:
             current_channel = self._read_wifi_channel()
-            if isinstance(current_channel, int) and int(current_channel) != int(channel):
+            try:
+                current_channel_int = int(current_channel)
+            except Exception:
+                current_channel_int = None
+            if current_channel_int == requested_channel:
                 self._log_info(
-                    "wifi STA connected on channel {}; ignoring requested channel {}".format(
-                        int(current_channel), int(channel)
+                    "wifi STA already connected; keeping channel {}".format(
+                        current_channel_int
                     )
                 )
-            else:
-                self._log_info(
-                    "wifi STA already connected; keeping channel {}".format(current_channel)
+                return
+            self._log_info(
+                "wifi STA connected on channel {}; switching to requested channel {}".format(
+                    current_channel_int if current_channel_int is not None else current_channel,
+                    requested_channel,
                 )
-            return
+            )
+            try:
+                self.wlan_sta.disconnect()
+                self.wlan_sta.active(False)
+                self.wlan_sta.active(True)
+            except Exception as exc:
+                self._log_error("wifi disconnect/restart failed channel switch err={}".format(exc))
 
         try:
             pm_none = getattr(self.wlan_sta, "PM_NONE", None)
@@ -584,10 +597,10 @@ class LighthouseMesh:
         except Exception as exc:
             self._log_debug("wifi pm config unavailable err={}".format(exc))
         try:
-            self.wlan_sta.config(channel=int(channel))
-            self._log_info("wifi channel configured to {}".format(int(channel)))
+            self.wlan_sta.config(channel=requested_channel)
+            self._log_info("wifi channel configured to {}".format(requested_channel))
         except Exception as exc:
-            self._log_error("wifi channel config failed channel={} err={}".format(channel, exc))
+            self._log_error("wifi channel config failed channel={} err={}".format(requested_channel, exc))
 
     def _read_wifi_channel(self):
         try:
