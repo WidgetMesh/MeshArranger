@@ -5,5 +5,5 @@
     ["dnet_gtwy/RestInterface.py", "github:WidgetMesh/MeshArranger/dnet_gtwy/code/RestInterface.py"],
     ["dnet_gtwy/rest_server.py", "github:WidgetMesh/MeshArranger/dnet_gtwy/code/rest_server.py"]
   ],
-  "version": "0.106"
+  "version": "0.107"
 }

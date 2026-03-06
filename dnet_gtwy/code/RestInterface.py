@@ -1,7 +1,11 @@
 import json
 print("dnet_gtwy: RestInterface module imported")
 import wifi
-
+try:
+    import uasyncio as asyncio
+except Exception:
+    import asyncio
+    
 from MicroPyServer import MicroPyServer
 
 from dnet.messaging import MessagingEndpoint
@@ -124,6 +128,9 @@ class RestInterface:
         self.server.send(response)
 
     def start(self):
+        
+        asyncio.run(self.mesh.run())
+        
         print(
             "Gateway REST server starting on {}:{} ...".format(
                 self.host, self.port
