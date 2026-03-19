@@ -1,0 +1,14 @@
+[
+  {
+    "fullPath": "/boot.py",
+    "name": "boot.py",
+    "isDir": false,
+    "depth": 0
+  },
+  {
+    "fullPath": "/lib",
+    "name": "lib",
+    "isDir": true,
+    "depth": 0
+  }
+]
