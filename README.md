@@ -1,3 +1,4 @@
+#Moved to Gitlab see: https://gitlab.com/robot-primitives/widget-mesh/mesharranger
 # Distributed Mesh Network Communication Spec
 
 This document defines the DistNet protocol model used by MeshArranger and the host-facing command surface exposed through the DistNet gateway.
